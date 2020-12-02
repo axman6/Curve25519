@@ -6,4 +6,4 @@
 [![Stackage Nightly](http://stackage.org/package/Curve25519/badge/nightly)](http://stackage.org/nightly/package/Curve25519)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-See README for more infoPure HAskell iomplementation of Curve255 19
+A Pure Haskell iomplementation of Curve25519, following https://martin.kleppmann.com/papers/curve25519.pdf (see https://martin.kleppmann.com/2020/11/18/distributed-systems-and-elliptic-curves.html for announcement )

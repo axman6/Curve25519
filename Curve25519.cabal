@@ -1,8 +1,8 @@
 cabal-version:       2.4
 name:                Curve25519
 version:             0.0.0.0
-synopsis:            See README for more infoPure HAskell iomplementation of Curve255 19
-description:         See README for more infoPure HAskell iomplementation of Curve255 19
+synopsis:            A Pure Haskell iomplementation of Curve25519
+description:         A Pure Haskell iomplementation of Curve25519
 homepage:            https://github.com/axman6/Curve25519
 bug-reports:         https://github.com/axman6/Curve25519/issues
 license:             MIT
