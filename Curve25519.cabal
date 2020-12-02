@@ -22,7 +22,11 @@ source-repository head
 
 common common-options
   build-depends:       base ^>= 4.13.0.0
-  
+                      , base16-bytestring
+                      , bytestring
+                      , primitive
+                      , vector
+
   ghc-options:         -Wall
                        -Wcompat
                        -Widentities
@@ -39,8 +43,7 @@ common common-options
     ghc-options:       -Wmissing-deriving-strategies
 
   default-language:    Haskell2010
-  default-extensions:  OverloadedLists
-                       LambdaCase
+  default-extensions:  LambdaCase
                        ScopedTypeVariables
                        TypeApplications
                        ViewPatterns

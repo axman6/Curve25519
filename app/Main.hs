@@ -1,7 +1,7 @@
 module Main (main) where
 
-import Curve25519 (someFunc)
+import Curve25519 ()
 
 
 main :: IO ()
-main = someFunc
+main = pure ()
