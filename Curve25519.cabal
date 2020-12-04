@@ -24,6 +24,7 @@ common common-options
   build-depends:       base ^>= 4.13.0.0
                       , base16-bytestring
                       , bytestring
+                      , ghc-prim
                       , primitive
                       , vector
 
@@ -51,7 +52,7 @@ common common-options
 library
   import:              common-options
   hs-source-dirs:      src
-  exposed-modules:     Curve25519
+  exposed-modules:     Curve25519, Curve25519Bytes
 
 executable Curve25519
   import:              common-options

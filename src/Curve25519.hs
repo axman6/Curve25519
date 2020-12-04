@@ -9,16 +9,14 @@ Maintainer: Alex Mason <github@me.axman6.com>
 See README for more infoPure HAskell iomplementation of Curve255 19
 -}
 
-module Curve25519 where
-    --    ( FieldElem
-    --    , FieldElemM
-    --    , withFieldElem
+module Curve25519 (Field, testInverseMul, unpack25519, pack25519) where
+    --    ( Field
+    --    , FieldM
+    --    , withField
     --    , unpack25519
     --    ) where
 
 import Data.Int (Int64)
-import qualified Data.Vector.Unboxed as V
-import qualified Data.Vector.Unboxed.Mutable as MV
 
 import Data.Bits
 
@@ -31,46 +29,83 @@ import Control.Monad.ST
 import Control.Monad.Primitive
 import Data.Functor ((<&>))
 
+import Data.Primitive.ByteArray
+
 type I64 = Int64
 
-newtype FieldElem    = FieldElem (V.Vector I64) deriving stock Show
-newtype FieldElemM s = FieldElemM (MV.MVector s I64)
+data Field    = Field  {-# UNPACK #-}!ByteArray            deriving stock Show
+data FieldM s = FieldM {-# UNPACK #-}!(MutableByteArray s)
 
-withFieldElem :: PrimMonad m => FieldElem -> (FieldElemM (PrimState m) -> m a) -> m FieldElem
-withFieldElem (FieldElem inV) f = FieldElem <$> do
-    !minV <- V.thaw inV
-    !_ <- f (FieldElemM minV)
-    V.unsafeFreeze minV
+withField :: PrimMonad m => Field -> (FieldM (PrimState m) -> m a) -> m Field
+{-# INLINE withField #-}
+withField inV f = do
+    !minV <- thaw inV
+    !_ <- f minV
+    unsafeFreeze minV
 
-thaw :: PrimMonad m => FieldElem -> m (FieldElemM (PrimState m))
-thaw (FieldElem v) = FieldElemM <$> V.thaw v
+thaw :: PrimMonad m => Field -> m (FieldM (PrimState m))
+{-# INLINE thaw #-}
+thaw (Field ba) = do
+  let !size = sizeofByteArray ba
+  mba <- newByteArray size
+  copyByteArray mba 0 ba 0 size
+  pure $! FieldM mba
 
-withFieldElem' :: PrimMonad m => (FieldElemM (PrimState m) -> m a) -> m FieldElem
-withFieldElem' f = do
-    fe@(FieldElemM v) <- new
-    _ <- f fe
-    FieldElem <$> V.unsafeFreeze v
+unsafeFreeze :: PrimMonad m => FieldM (PrimState m) -> m Field
+{-# INLINE unsafeFreeze #-}
+unsafeFreeze (FieldM mba) = do
+  !ba <- unsafeFreezeByteArray mba
+  pure $! Field ba
 
+withField' :: PrimMonad m => (FieldM (PrimState m) -> m a) -> m Field
+{-# INLINE withField' #-}
+withField' f = do
+    a <- new
+    !_ <- f a
+    unsafeFreeze a
 
-new :: PrimMonad m => m (FieldElemM (PrimState m))
-new = FieldElemM <$> MV.replicate 16 0
+new :: PrimMonad m => m (FieldM (PrimState m))
+{-# INLINE new #-}
+new = newSized 16
 
-newSized :: PrimMonad m => Int ->  m (FieldElemM (PrimState m))
-newSized size = FieldElemM <$> MV.replicate size 0
+newSized :: PrimMonad m => Int ->  m (FieldM (PrimState m))
+{-# INLINE newSized #-}
+newSized numInts = do
+  !mba <- newByteArray (numInts * 8)
+  setByteArray mba 0 numInts (0::Int64)
+  pure $ FieldM mba
 
-index :: PrimMonad m =>  FieldElemM (PrimState m) -> Int -> m I64
-index (FieldElemM v) !i = MV.read v i
+index :: PrimMonad m =>  FieldM (PrimState m) -> Int -> m I64
+{-# INLINE index #-}
+index (FieldM mba) i = readByteArray mba i
 
-write :: PrimMonad m => FieldElemM (PrimState m) -> Int -> I64 -> m ()
-write (FieldElemM v) !i !e = MV.write v i e
+unsafeIndex :: Field -> Int -> I64
+{-# INLINE unsafeIndex #-}
+unsafeIndex (Field ba) i = indexByteArray ba i
 
-modify :: PrimMonad m => FieldElemM (PrimState m) -> Int -> (I64 -> I64) -> m ()
-modify (FieldElemM v) !i !f = MV.unsafeModify v f i
+write :: PrimMonad m => FieldM (PrimState m) -> Int -> I64 -> m ()
+{-# INLINE write #-}
+write (FieldM mba) !i !e = writeByteArray mba i e
 
+modify :: PrimMonad m => FieldM (PrimState m) -> Int -> (I64 -> I64) -> m ()
+{-# INLINE modify #-}
+modify field !i !f = do
+  e <- index field i
+  write field i $! f e
 
-for16 :: PrimMonad m => (Int -> m a) -> m ()
+for16 :: Monad m => (Int -> m a) -> m ()
+{-# INLINE for16 #-}
 for16 f = forM_ [0..15] f
 
+copy16 :: PrimMonad m => FieldM (PrimState m) -> FieldM (PrimState m) -> m ()
+{-# INLINE copy16 #-}
+copy16 to from = for16 $ \i -> write to i =<< index from i
+
+(>>>), (<<<) :: Bits a => a -> Int -> a
+{-# INLINE (>>>) #-}
+{-# INLINE (<<<) #-}
+a >>> n = unsafeShiftR a n
+a <<< n = unsafeShiftL a n
 {-
 5 static void unpack25519(field_elem out, const u8 *in)
 6{
@@ -79,16 +114,27 @@ for16 f = forM_ [0..15] f
 9     out[15] &= 0x7fff;
 10 }
 -}
-unpack25519 :: ByteString -> Maybe FieldElem
+unpack25519 :: ByteString -> Field
 unpack25519 bs
-    | BS.length bs /= 32 = Nothing
-    | otherwise = Just $! res
-    where res = runST $ withFieldElem' $ \fe ->
+    | BS.length bs /= 32 = error "unpack25519: Input must be 32 bytes long"
+    | otherwise = runST $ withField' $ \fe ->
             for16 $ \i -> do
                 let !lo = fromIntegral $ BSU.unsafeIndex bs (i*2)
                     !hi = fromIntegral $ BSU.unsafeIndex bs (i*2 + 1)
-                write fe i (lo + (hi `unsafeShiftL` 8))
+                write fe i (lo + (hi <<< 8))
                 modify fe 15 (.&. 0x7fff)
+
+unpack25519M :: PrimMonad m => ByteString -> m (FieldM (PrimState m))
+unpack25519M bs
+    | BS.length bs /= 32 = error "unpack25519: Input must be 32 bytes long"
+    | otherwise = do
+        fe <- new
+        for16 $ \i -> do
+            let !lo = fromIntegral $ BSU.unsafeIndex bs (i*2)
+                !hi = fromIntegral $ BSU.unsafeIndex bs (i*2 + 1)
+            write fe i (lo + (hi <<< 8))
+            modify fe 15 (.&. 0x7fff)
+        pure fe
 
 
 {-
@@ -103,11 +149,11 @@ unpack25519 bs
 20      }
 21 }
 -}
-carry25519 :: PrimMonad m => FieldElemM (PrimState m) -> m ()
+carry25519 :: PrimMonad m => FieldM (PrimState m) -> m ()
 carry25519 fe = do
     for16 $ \i -> do
-        !carry <- index fe i <&> (`unsafeShiftR` 16)
-        modify fe i $ \e -> e - carry `unsafeShiftL` 16
+        !carry <- index fe i <&> (>>> 16)
+        modify fe i $ \e -> e - carry <<< 16
         if i < 15
         then modify fe (i+1) $ \e -> e + carry
         else modify fe 0     $ \e -> e + 38 * carry
@@ -120,15 +166,21 @@ carry25519 fe = do
 27 }
 -}
 fadd :: PrimMonad m
-    => FieldElemM (PrimState m) -- ^ out = a + b
-    -> FieldElemM (PrimState m) -- ^ a
-    -> FieldElemM (PrimState m) -- ^ b
+    => FieldM (PrimState m) -- ^ out = a + b
+    -> FieldM (PrimState m) -- ^ a
+    -> FieldM (PrimState m) -- ^ b
     -> m ()
 fadd out a b = do
     for16 $ \i -> do
         a' <- index a i
         b' <- index b i
         write out i $! a' + b'
+
+(+=) :: PrimMonad m
+    => FieldM (PrimState m)                             -- ^ out = a + b
+    -> (FieldM (PrimState m), FieldM (PrimState m)) -- ^ (a,b)
+    -> m ()
+out += (a,b) = fadd out a b
 
 {-
 29 static void fsub(field_elem out, const field_elem a, const field_elem b) /* out = a - b */
@@ -139,15 +191,21 @@ fadd out a b = do
 -}
 
 fsub :: PrimMonad m
-    => FieldElemM (PrimState m) -- ^ out = a - b
-    -> FieldElemM (PrimState m) -- ^ a
-    -> FieldElemM (PrimState m) -- ^ b
+    => FieldM (PrimState m) -- ^ out = a - b
+    -> FieldM (PrimState m) -- ^ a
+    -> FieldM (PrimState m) -- ^ b
     -> m ()
 fsub out a b = do
     for16 $ \i -> do
         a' <- index a i
         b' <- index b i
         write out i $! a' - b'
+
+(-=) :: PrimMonad m
+    => FieldM (PrimState m)                             -- ^ out = a + b
+    -> (FieldM (PrimState m), FieldM (PrimState m)) -- ^ (a,b)
+    -> m ()
+out -= (a,b) = fsub out a b
 
 
 {- 35 static void fmul(field_elem out, const field_elem a, const field_elem b) /* out = a * b */
@@ -165,9 +223,9 @@ fsub out a b = do
 -}
 
 fmul :: PrimMonad m
-    => FieldElemM (PrimState m) -- ^ out = a - b
-    -> FieldElemM (PrimState m) -- ^ a
-    -> FieldElemM (PrimState m) -- ^ b
+    => FieldM (PrimState m) -- ^ out = a - b
+    -> FieldM (PrimState m) -- ^ a
+    -> FieldM (PrimState m) -- ^ b
     -> m ()
 fmul out a b = do
     prod <- newSized 31
@@ -179,9 +237,15 @@ fmul out a b = do
     forM_ [0..14] $ \i -> do
         pi16 <- index prod (i+16)
         modify prod i (+ (38 * pi16))
-    for16 $ \i -> write out i =<< index prod i
+    copy16 out prod
     carry25519 out
     carry25519 out
+
+(*=) :: PrimMonad m
+    => FieldM (PrimState m)                             -- ^ out = a + b
+    -> (FieldM (PrimState m), FieldM (PrimState m)) -- ^ (a,b)
+    -> m ()
+out *= (a,b) = fmul out a b
 
 {-
 5 static void finverse(field_elem out, const field_elem in)
@@ -198,29 +262,33 @@ fmul out a b = do
 -}
 
 finverse :: PrimMonad m
-    => FieldElemM (PrimState m) -- ^ out = a^-1
-    -> FieldElemM (PrimState m) -- ^ a
+    => FieldM (PrimState m) -- ^ out = a^-1
+    -> FieldM (PrimState m) -- ^ a
     -> m ()
 finverse out fe = do
     c <- new
-    for16 $ \i -> write c i =<< index fe i
+    copy16 c fe
     forM_ [253, 253-1 .. 0 :: Int] $ \i -> do
-        fmul c c c
+        c *= (c, c)
         when (i /= 2 && i /= 4) $
-            fmul c c fe
-    for16 $ \i -> write out i =<< index c i
+            c *= (c, fe)
+    copy16 out c
 
-    pure ()
+(~=) :: PrimMonad m
+    => FieldM (PrimState m) -- ^ out = a + b
+    -> FieldM (PrimState m) -- ^ a
+    -> m ()
+out ~= a = finverse out a
 
 testInverseMul :: PrimMonad m
-    =>  FieldElem
+    =>  Field
     -> m ByteString
 testInverseMul a = do
     a' <- thaw a
     ainv <- new
-    finverse ainv a'
+    ainv ~= a'
     res <- new
-    fmul res a' ainv
+    res *= (a', ainv)
     pack25519 res
 
 
@@ -238,8 +306,8 @@ testInverseMul a = do
 -}
 
 swap25519 :: PrimMonad m
-    => FieldElemM (PrimState m) -- ^ out = a^-1
-    -> FieldElemM (PrimState m) -- ^ a
+    => FieldM (PrimState m) -- ^ out = a^-1
+    -> FieldM (PrimState m) -- ^ a
     -> I64
     -> m ()
 swap25519 p q bit_ = do
@@ -279,13 +347,13 @@ swap25519 p q bit_ = do
 -}
 
 pack25519' :: PrimMonad m
-    => FieldElemM (PrimState m) -- ^ out = a where all elements are in [0..2^16-1] and total is mod p
-    -> FieldElemM (PrimState m) -- ^ a
+    => FieldM (PrimState m) -- ^ out = a where all elements are in [0..2^16-1] and total is mod p
+    -> FieldM (PrimState m) -- ^ a
     -> m ()
 pack25519' out a = do
     m <- new
     let t = out
-    for16 $ \i -> write t i =<< index a i
+    copy16 t a
     carry25519 t
     carry25519 t
     carry25519 t
@@ -294,26 +362,26 @@ pack25519' out a = do
         forM_ [1..14] $ \i -> do
             ti  <- index t i
             mi1 <- index m (i-1)
-            write m i     $! ti - 0xffff - ((mi1 `unsafeShiftR` 16) .&. 1)
+            write m i     $! ti - 0xffff - ((mi1 >>> 16) .&. 1)
             write m (i-1) $! mi1 .&. 0xffff
         m14 <- index m 14
         t15 <- index t 15
-        write m 15 $! t15 - 0x7fff - ((m14 `unsafeShiftR` 16) .&. 1)
+        write m 15 $! t15 - 0x7fff - ((m14 >>> 16) .&. 1)
         m15 <- index m 15
-        let !carry = (m15 `unsafeShiftR` 16) .&. 1
+        let !carry = (m15 >>> 16) .&. 1
         write m 14 $ m14 .&. 0xffff
         swap25519 t m (1 - carry)
 
 pack25519 :: PrimMonad m
-    => FieldElemM (PrimState m)
+    => FieldM (PrimState m)
     -> m ByteString
 pack25519 a = do
-    (FieldElem frozen) <- withFieldElem' $ \out -> pack25519' out a
+    frozen <- withField' $ \out -> pack25519' out a
     let (!bs,_) = BS.unfoldrN 32 f 0
         f i =
             let !i' = i + 1
-                !v = fromIntegral $(V.unsafeIndex frozen (i `unsafeShiftR` 1)
-                        `unsafeShiftR` (8 * (i .&. 1))
+                !v = fromIntegral $ (unsafeIndex frozen (i >>> 1)
+                        >>> (8 * (i .&. 1))
                     ) .&. 0xffff
             in Just $! (v,i')
     pure bs
