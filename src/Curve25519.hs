@@ -10,7 +10,17 @@ Maintainer: Alex Mason <github@me.axman6.com>
 See README for more infoPure HAskell iomplementation of Curve255 19
 -}
 
-module Curve25519 (Field, testInverseMul, unpack25519, pack25519, scalarmult, finverse) where
+module Curve25519
+    (Field
+    , testInverseMul
+    , unpack25519
+    , pack25519
+    , scalarmult
+    , finverse
+    , generate_keypair
+    , pubkey
+    , x25519
+    ) where
     --    ( Field
     --    , FieldM
     --    , withField
@@ -32,6 +42,9 @@ import Control.Monad.Primitive
 import Data.Functor ((<&>))
 
 import Data.Primitive.ByteArray
+
+import System.Entropy
+
 
 type I64 = Int64
 
@@ -457,8 +470,6 @@ scalarmult scalar point = do
     f <- new
     -- unpack25519(x, point);
     x <- unpack25519M point
-    x' <- unsafeFreeze x
-    print x'
     -- for (i = 0; i < 31; ++i) clamped[i] = scalar[i];
     !clamped <- newByteArray (32 * 8)
     setByteArray clamped 0 32 (0::Int64)
@@ -473,9 +484,6 @@ scalarmult scalar point = do
     --     b[i] = x[i];
     --     d[i] = a[i] = c[i] = 0;
     -- }
-    !clamped' <- unsafeFreeze (FieldM clamped)
-    print clamped'
-
     copy16 b x
     -- a[0] = d[0] = 1;
     write a 0 0x1
@@ -512,11 +520,6 @@ scalarmult scalar point = do
     pack25519 a
 
 
-    -- for16 $ \i -> do
-    --     !lo <- fromIntegral @Word8 <$> readByteArray clamped (i*2)
-    --     !hi <- fromIntegral @Word8 <$> readByteArray clamped (i*2 + 1)
-    --     write x i (lo + (hi <<< 8))
-    --     modify x 15 (.&. 0x7fff)
 
 {-
 1 typedef unsigned char u8;
@@ -524,7 +527,8 @@ scalarmult scalar point = do
 3 extern void randombytes(u8 *, u64);
 4 static const u8 _9[32] = {9};
 5
-6 void scalarmult_base(u8 *out, const u8 *scalar) 7{
+6 void scalarmult_base(u8 *out, const u8 *scalar)
+7{
 8   scalarmult(out, scalar, _9);
 9}
 -}
@@ -535,19 +539,28 @@ scalarmult_base scalar =
 
 {-
 void generate_keypair(u8 *pk, u8 *sk) {
-  randombytes(sk, 32);
+    randombytes(sk, 32);
     scalarmult_base(pk, sk);
 }
 -}
 
 generate_keypair :: IO (ByteString, ByteString)  -- (public, private)
 generate_keypair = do
+    sk <- getEntropy 32
+    pk <- scalarmult_base sk
+    pure (pk, sk)
 
+pubkey :: ByteString -> IO ByteString  -- (public, private)
+pubkey sk = do
+    pk <- scalarmult_base sk
+    pure pk
 
 {-
 void x25519(u8 *out, const u8 *pk, const u8 *sk) {
   scalarmult(out, sk, pk);
 }
-
-
 -}
+
+x25519 :: PrimMonad m => ByteString -> ByteString -> m ByteString
+x25519 pk sk = scalarmult sk pk
+

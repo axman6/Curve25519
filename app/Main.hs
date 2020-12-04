@@ -2,8 +2,8 @@
 
 module Main (main) where
 
-import Curve25519 (testInverseMul, unpack25519)
 import Data.ByteString.Base16
+import Curve25519 (testInverseMul, unpack25519)
 
 
 main :: IO ()
