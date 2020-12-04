@@ -1,6 +1,7 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE OverloadedStrings #-}
 {- |
 Copyright: (c) 2020 Alex Mason
 SPDX-License-Identifier: MIT
@@ -9,7 +10,7 @@ Maintainer: Alex Mason <github@me.axman6.com>
 See README for more infoPure HAskell iomplementation of Curve255 19
 -}
 
-module Curve25519 (Field, testInverseMul, unpack25519, pack25519) where
+module Curve25519 (Field, testInverseMul, unpack25519, pack25519, scalarmult, finverse) where
     --    ( Field
     --    , FieldM
     --    , withField
@@ -17,6 +18,7 @@ module Curve25519 (Field, testInverseMul, unpack25519, pack25519) where
     --    ) where
 
 import Data.Int (Int64)
+import Data.Word (Word8)
 
 import Data.Bits
 
@@ -385,3 +387,167 @@ pack25519 a = do
                     ) .&. 0xffff
             in Just $! (v,i')
     pure bs
+
+
+{-
+1 typedef long long i64;
+2 typedef i64 field_elem[16];
+3 static const field_elem _121665 = {0xDB41, 1},
+4
+5 void scalarmult(u8 *out, const u8 *scalar, const u8 *point)
+6 {
+7       u8 clamped[32];
+8       i64 bit, i;
+9       field_elem a, b, c, d, e, f, x;
+10      for (i = 0; i < 31; ++i) clamped[i] = scalar[i];
+11      clamped[0] &= 0xf8;
+12      clamped[31] = (clamped[31] & 0x7f) | 0x40;
+13      unpack25519(x, point);
+14      for (i = 0; i < 16; ++i) {
+15          b[i] = x[i];
+16          d[i] = a[i] = c[i] = 0;
+17      }
+18      a[0] = d[0] = 1;
+19      for (i = 254; i >= 0; --i) {
+20          bit = (clamped[i >> 3] >> (i & 7)) & 1;
+21          swap25519(a, b, bit);
+22          swap25519(c, d, bit);
+23          fadd(e, a, c);
+24          fsub(a, a, c);
+25          fadd(c, b, d);
+26          fsub(b, b, d);
+27          fmul(d, e, e);
+28          fmul(f, a, a);
+29          fmul(a, c, a);
+30          fmul(c, b, e);
+31          fadd(e, a, c);
+32          fsub(a, a, c);
+33          fmul(b, a, a);
+34          fsub(c, d, f);
+35          fmul(a, c, _121665);
+36          fadd(a, a, d);
+37          fmul(c, c, a);
+38          fmul(a, d, f);
+39          fmul(d, b, x);
+40          fmul(b, e, e);
+41          swap25519(a, b, bit);
+42          swap25519(c, d, bit);
+43      }
+44      finverse(c, c);
+45      fmul(a, a, c);
+46      pack25519(out, a);
+47 }
+-}
+
+scalarmult :: PrimMonad m
+    => ByteString
+    -> ByteString
+    -> m ByteString
+scalarmult scalar point = do
+    -- static const field_elem _121665 = {0xDB41, 1},
+    const_121665 <- new
+    write const_121665 0 0xDB41
+    write const_121665 1 0x0001
+    -- field_elem a, b, c, d, e, f, x;
+    a <- new
+    b <- new
+    c <- new
+    d <- new
+    e <- new
+    f <- new
+    -- unpack25519(x, point);
+    x <- unpack25519M point
+    x' <- unsafeFreeze x
+    print x'
+    -- for (i = 0; i < 31; ++i) clamped[i] = scalar[i];
+    !clamped <- newByteArray (32 * 8)
+    setByteArray clamped 0 32 (0::Int64)
+    forM_ [0..31] $ \i -> do
+        writeByteArray clamped i (BSU.unsafeIndex scalar i)
+    -- clamped[0]                   =                  clamped[0]      &  0xf8;
+    writeByteArray @Word8 clamped 0 =<< (readByteArray clamped 0 <&> (.&. 0xf8))
+    -- clamped[31]            = (               clamped[31]                &  0x7f)  |   0x40;
+    -- writeByteArray clamped 31 $! (((BSU.unsafeIndex scalar 31) .&. 0x7f) .|. (0x40 :: Word8))
+    writeByteArray clamped 31 =<< (readByteArray clamped 31 <&> (\p -> (p .&. 0x7f) .|. (0x40 :: Word8)))
+    -- for (i = 0; i < 16; ++i) {
+    --     b[i] = x[i];
+    --     d[i] = a[i] = c[i] = 0;
+    -- }
+    !clamped' <- unsafeFreeze (FieldM clamped)
+    print clamped'
+
+    copy16 b x
+    -- a[0] = d[0] = 1;
+    write a 0 0x1
+    write d 0 0x1
+    -- for (i = 254; i >= 0; --i) {
+    forM_ [254, 254 - 1 .. 0] $ \i -> do
+        -- bit = (clamped[i >> 3] >> (i & 7)) & 1;
+        clampedi3 <- fromIntegral @Word8<$> readByteArray clamped (i >>> 3)
+        let !bit = (clampedi3 >>> (i .&. 7)) .&. 1
+        swap25519 a b bit
+        swap25519 c d bit
+        fadd e a c
+        fsub a a c
+        fadd c b d
+        fsub b b d
+        fmul d e e
+        fmul f a a
+        fmul a c a
+        fmul c b e
+        fadd e a c
+        fsub a a c
+        fmul b a a
+        fsub c d f
+        fmul a c const_121665
+        fadd a a d
+        fmul c c a
+        fmul a d f
+        fmul d b x
+        fmul b e e
+        swap25519 a b bit
+        swap25519 c d bit
+    finverse c c
+    fmul a a c
+    pack25519 a
+
+
+    -- for16 $ \i -> do
+    --     !lo <- fromIntegral @Word8 <$> readByteArray clamped (i*2)
+    --     !hi <- fromIntegral @Word8 <$> readByteArray clamped (i*2 + 1)
+    --     write x i (lo + (hi <<< 8))
+    --     modify x 15 (.&. 0x7fff)
+
+{-
+1 typedef unsigned char u8;
+2 typedef unsigned long long u64;
+3 extern void randombytes(u8 *, u64);
+4 static const u8 _9[32] = {9};
+5
+6 void scalarmult_base(u8 *out, const u8 *scalar) 7{
+8   scalarmult(out, scalar, _9);
+9}
+-}
+
+scalarmult_base :: PrimMonad m => ByteString -> m ByteString
+scalarmult_base scalar =
+    scalarmult scalar "\9\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+
+{-
+void generate_keypair(u8 *pk, u8 *sk) {
+  randombytes(sk, 32);
+    scalarmult_base(pk, sk);
+}
+-}
+
+generate_keypair :: IO (ByteString, ByteString)  -- (public, private)
+generate_keypair = do
+
+
+{-
+void x25519(u8 *out, const u8 *pk, const u8 *sk) {
+  scalarmult(out, sk, pk);
+}
+
+
+-}
