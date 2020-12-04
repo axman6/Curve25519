@@ -52,7 +52,7 @@ common common-options
 library
   import:              common-options
   hs-source-dirs:      src
-  exposed-modules:     Curve25519, Curve25519Bytes
+  exposed-modules:     Curve25519
 
 executable Curve25519
   import:              common-options
