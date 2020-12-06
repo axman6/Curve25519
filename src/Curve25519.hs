@@ -17,9 +17,12 @@ module Curve25519
     , pack25519
     , scalarmult
     , finverse
-    , generate_keypair
+    , generateKeypair
     , pubkey
     , x25519
+    , Scalar(..)
+    , PublicKey(..)
+    , SecretKey(..)
     ) where
     --    ( Field
     --    , FieldM
@@ -48,15 +51,12 @@ import System.Entropy
 
 type I64 = Int64
 
-data Field    = Field  {-# UNPACK #-}!ByteArray            deriving stock Show
-data FieldM s = FieldM {-# UNPACK #-}!(MutableByteArray s)
+newtype Field    = Field  ByteArray            deriving stock Show
+newtype FieldM s = FieldM (MutableByteArray s)
 
-withField :: PrimMonad m => Field -> (FieldM (PrimState m) -> m a) -> m Field
-{-# INLINE withField #-}
-withField inV f = do
-    !minV <- thaw inV
-    !_ <- f minV
-    unsafeFreeze minV
+newtype SecretKey = SecretKey ByteString
+newtype PublicKey = PublicKey ByteString
+newtype Scalar = Scalar ByteString
 
 thaw :: PrimMonad m => Field -> m (FieldM (PrimState m))
 {-# INLINE thaw #-}
@@ -92,11 +92,11 @@ newSized numInts = do
 
 index :: PrimMonad m =>  FieldM (PrimState m) -> Int -> m I64
 {-# INLINE index #-}
-index (FieldM mba) i = readByteArray mba i
+index (FieldM mba) = readByteArray mba
 
 unsafeIndex :: Field -> Int -> I64
 {-# INLINE unsafeIndex #-}
-unsafeIndex (Field ba) i = indexByteArray ba i
+unsafeIndex (Field ba) = indexByteArray ba
 
 write :: PrimMonad m => FieldM (PrimState m) -> Int -> I64 -> m ()
 {-# INLINE write #-}
@@ -110,7 +110,7 @@ modify field !i !f = do
 
 for16 :: Monad m => (Int -> m a) -> m ()
 {-# INLINE for16 #-}
-for16 f = forM_ [0..15] f
+for16 = forM_ [0..15]
 
 copy16 :: PrimMonad m => FieldM (PrimState m) -> FieldM (PrimState m) -> m ()
 {-# INLINE copy16 #-}
@@ -191,12 +191,6 @@ fadd out a b = do
         b' <- index b i
         write out i $! a' + b'
 
-(+=) :: PrimMonad m
-    => FieldM (PrimState m)                             -- ^ out = a + b
-    -> (FieldM (PrimState m), FieldM (PrimState m)) -- ^ (a,b)
-    -> m ()
-out += (a,b) = fadd out a b
-
 {-
 29 static void fsub(field_elem out, const field_elem a, const field_elem b) /* out = a - b */
 30 {
@@ -215,12 +209,6 @@ fsub out a b = do
         a' <- index a i
         b' <- index b i
         write out i $! a' - b'
-
-(-=) :: PrimMonad m
-    => FieldM (PrimState m)                             -- ^ out = a + b
-    -> (FieldM (PrimState m), FieldM (PrimState m)) -- ^ (a,b)
-    -> m ()
-out -= (a,b) = fsub out a b
 
 
 {- 35 static void fmul(field_elem out, const field_elem a, const field_elem b) /* out = a * b */
@@ -256,12 +244,6 @@ fmul out a b = do
     carry25519 out
     carry25519 out
 
-(*=) :: PrimMonad m
-    => FieldM (PrimState m)                             -- ^ out = a + b
-    -> (FieldM (PrimState m), FieldM (PrimState m)) -- ^ (a,b)
-    -> m ()
-out *= (a,b) = fmul out a b
-
 {-
 5 static void finverse(field_elem out, const field_elem in)
 6{
@@ -284,16 +266,10 @@ finverse out fe = do
     c <- new
     copy16 c fe
     forM_ [253, 253-1 .. 0 :: Int] $ \i -> do
-        c *= (c, c)
+        fmul c c c
         when (i /= 2 && i /= 4) $
-            c *= (c, fe)
+            fmul c c fe
     copy16 out c
-
-(~=) :: PrimMonad m
-    => FieldM (PrimState m) -- ^ out = a + b
-    -> FieldM (PrimState m) -- ^ a
-    -> m ()
-out ~= a = finverse out a
 
 testInverseMul :: PrimMonad m
     =>  Field
@@ -301,9 +277,9 @@ testInverseMul :: PrimMonad m
 testInverseMul a = do
     a' <- thaw a
     ainv <- new
-    ainv ~= a'
+    finverse ainv a'
     res <- new
-    res *= (a', ainv)
+    fmul res a' ainv
     pack25519 res
 
 
@@ -335,7 +311,6 @@ swap25519 p q bit_ = do
         modify q i (xor t)
 
 {-
-
 27 static void pack25519(u8 *out, const field_elem in)
 28 {
 29      int i, j, carry;
@@ -358,7 +333,6 @@ swap25519 p q bit_ = do
 46          out[2*i + 1] = t[i] >> 8;
 47      }
 48 }
-
 -}
 
 pack25519' :: PrimMonad m
@@ -373,7 +347,7 @@ pack25519' out a = do
     carry25519 t
     carry25519 t
     replicateM_ 2 $ do
-        write m 0 =<< (index t 0 <&> (subtract 0xffed))
+        write m 0 . subtract 0xffed =<< index t 0
         forM_ [1..14] $ \i -> do
             ti  <- index t i
             mi1 <- index m (i-1)
@@ -398,9 +372,8 @@ pack25519 a = do
                 !v = fromIntegral $ (unsafeIndex frozen (i >>> 1)
                         >>> (8 * (i .&. 1))
                     ) .&. 0xffff
-            in Just $! (v,i')
+            in Just (v,i')
     pure bs
-
 
 {-
 1 typedef long long i64;
@@ -453,10 +426,10 @@ pack25519 a = do
 -}
 
 scalarmult :: PrimMonad m
-    => ByteString
+    => Scalar
     -> ByteString
     -> m ByteString
-scalarmult scalar point = do
+scalarmult (Scalar scalar) point = do
     -- static const field_elem _121665 = {0xDB41, 1},
     const_121665 <- new
     write const_121665 0 0xDB41
@@ -476,10 +449,10 @@ scalarmult scalar point = do
     forM_ [0..31] $ \i -> do
         writeByteArray clamped i (BSU.unsafeIndex scalar i)
     -- clamped[0]                   =                  clamped[0]      &  0xf8;
-    writeByteArray @Word8 clamped 0 =<< (readByteArray clamped 0 <&> (.&. 0xf8))
+    writeByteArray @Word8 clamped 0 . (.&. 0xf8) =<< readByteArray clamped 0
     -- clamped[31]            = (               clamped[31]                &  0x7f)  |   0x40;
     -- writeByteArray clamped 31 $! (((BSU.unsafeIndex scalar 31) .&. 0x7f) .|. (0x40 :: Word8))
-    writeByteArray clamped 31 =<< (readByteArray clamped 31 <&> (\p -> (p .&. 0x7f) .|. (0x40 :: Word8)))
+    writeByteArray clamped 31 . (\p -> (p .&. 0x7f) .|. (0x40 :: Word8)) =<< readByteArray clamped 31
     -- for (i = 0; i < 16; ++i) {
     --     b[i] = x[i];
     --     d[i] = a[i] = c[i] = 0;
@@ -492,9 +465,9 @@ scalarmult scalar point = do
     forM_ [254, 254 - 1 .. 0] $ \i -> do
         -- bit = (clamped[i >> 3] >> (i & 7)) & 1;
         clampedi3 <- fromIntegral @Word8<$> readByteArray clamped (i >>> 3)
-        let !bit = (clampedi3 >>> (i .&. 7)) .&. 1
-        swap25519 a b bit
-        swap25519 c d bit
+        let !shouldSwap = (clampedi3 >>> (i .&. 7)) .&. 1
+        swap25519 a b shouldSwap
+        swap25519 c d shouldSwap
         fadd e a c
         fsub a a c
         fadd c b d
@@ -513,13 +486,11 @@ scalarmult scalar point = do
         fmul a d f
         fmul d b x
         fmul b e e
-        swap25519 a b bit
-        swap25519 c d bit
+        swap25519 a b shouldSwap
+        swap25519 c d shouldSwap
     finverse c c
     fmul a a c
     pack25519 a
-
-
 
 {-
 1 typedef unsigned char u8;
@@ -527,40 +498,37 @@ scalarmult scalar point = do
 3 extern void randombytes(u8 *, u64);
 4 static const u8 _9[32] = {9};
 5
-6 void scalarmult_base(u8 *out, const u8 *scalar)
+6 void scalarmultBase(u8 *out, const u8 *scalar)
 7{
 8   scalarmult(out, scalar, _9);
 9}
 -}
 
-scalarmult_base :: PrimMonad m => ByteString -> m ByteString
-scalarmult_base scalar =
+scalarmultBase :: PrimMonad m => Scalar -> m ByteString
+scalarmultBase scalar =
     scalarmult scalar "\9\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
 
 {-
-void generate_keypair(u8 *pk, u8 *sk) {
+void generateKeypair(u8 *pk, u8 *sk) {
     randombytes(sk, 32);
-    scalarmult_base(pk, sk);
+    scalarmultBase(pk, sk);
 }
 -}
 
-generate_keypair :: IO (ByteString, ByteString)  -- (public, private)
-generate_keypair = do
+generateKeypair :: IO (PublicKey, SecretKey)
+generateKeypair = do
     sk <- getEntropy 32
-    pk <- scalarmult_base sk
-    pure (pk, sk)
+    pk <- scalarmultBase (Scalar sk)
+    pure (PublicKey pk, SecretKey sk)
 
-pubkey :: ByteString -> IO ByteString  -- (public, private)
-pubkey sk = do
-    pk <- scalarmult_base sk
-    pure pk
+pubkey :: SecretKey -> IO PublicKey  -- (public, private)
+pubkey (SecretKey sk) = PublicKey <$> scalarmultBase (Scalar sk)
 
 {-
 void x25519(u8 *out, const u8 *pk, const u8 *sk) {
   scalarmult(out, sk, pk);
 }
 -}
-
-x25519 :: PrimMonad m => ByteString -> ByteString -> m ByteString
-x25519 pk sk = scalarmult sk pk
+x25519 :: PrimMonad m => PublicKey -> SecretKey -> m ByteString
+x25519 (PublicKey pk) (SecretKey sk) = scalarmult (Scalar sk) pk
 
